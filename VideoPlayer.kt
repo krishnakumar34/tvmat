@@ -1,18 +1,13 @@
 package com.example.tvmat
 
 import android.util.Log
-import android.view.KeyEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.FrameLayout
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
@@ -29,8 +24,8 @@ fun VideoPlayer(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     
-    // 1. Focus Requester: Essential for TV Remotes to work immediately
-    val focusRequester = remember { FocusRequester() }
+    // REMOVED: FocusRequester and onKeyEvent. 
+    // Control is now fully delegated to MainActivity.kt
 
     key(showControls) {
         var isInitialized by remember { mutableStateOf(false) }
@@ -55,13 +50,11 @@ fun VideoPlayer(
                 MPVLib.setOptionString("input-default-bindings", "yes")
 
                 if (showControls) {
-                    // Box layout ensures the seek bar is visible at the bottom
                     MPVLib.setOptionString("script-opts", "osc-layout=box,osc-seekbarstyle=bar,osc-deadzonesize=0,osc-minmousemove=0")
                 }
 
                 // --- OSD SETTINGS ---
                 MPVLib.setOptionString("osd-level", "3")
-                // This ensures the Seek Bar appears immediately when you press Left/Right
                 MPVLib.setOptionString("osd-on-seek", "msg-bar") 
                 MPVLib.setOptionString("osd-scale-by-window", "no")
                 MPVLib.setOptionString("osd-duration", "2500")
@@ -112,50 +105,8 @@ fun VideoPlayer(
             }
         }
 
-        // AUTO-FOCUS: Request focus so the Remote D-Pad works immediately
-        LaunchedEffect(Unit) {
-            focusRequester.requestFocus()
-        }
-
-        // WRAPPER BOX: Handles Key Events for TV Remote
-        Box(
-            modifier = modifier
-                .focusRequester(focusRequester)
-                .focusable()
-                .onKeyEvent { keyEvent ->
-                    if (!isInitialized) return@onKeyEvent false
-                    if (keyEvent.type == KeyEventType.KeyDown) {
-                        when (keyEvent.nativeKeyEvent.keyCode) {
-                            // D-Pad Left/Right: Seek 10 seconds
-                            KeyEvent.KEYCODE_DPAD_LEFT -> {
-                                MPVLib.command(*arrayOf("seek", "-10"))
-                                true
-                            }
-                            KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                                MPVLib.command(*arrayOf("seek", "10"))
-                                true
-                            }
-                            // D-Pad Center/Enter: Toggle Controls/Pause
-                            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                                if (showControls) {
-                                    MPVLib.command("script-binding", "osc/visibility")
-                                } else {
-                                    MPVLib.command("cycle", "pause")
-                                }
-                                true
-                            }
-                            // Play/Pause Media Keys
-                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                                MPVLib.command("cycle", "pause")
-                                true
-                            }
-                            else -> false
-                        }
-                    } else {
-                        false
-                    }
-                }
-        ) {
+        // WRAPPER BOX: Purely for Layout now, no input handling
+        Box(modifier = modifier) {
             AndroidView(
                 factory = { ctx ->
                     SurfaceView(ctx).apply {
