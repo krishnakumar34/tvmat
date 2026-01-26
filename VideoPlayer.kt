@@ -1,4 +1,4 @@
-package com.example.tvmate
+package com.example.tvmat
 
 import android.util.Log
 import android.view.KeyEvent
