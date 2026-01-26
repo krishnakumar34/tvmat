@@ -208,7 +208,7 @@ jobs:
         EOF
 
         # 7. Generate Strings
-        echo '<resources><string name="app_name">TV Mate</string></resources>' > app/src/main/res/values/strings.xml
+        echo '<resources><string name="app_name">TV Mat</string></resources>' > app/src/main/res/values/strings.xml
 
         # 8. Generate Vector Icon
         cat <<EOF > app/src/main/res/mipmap-hdpi/ic_launcher.xml
