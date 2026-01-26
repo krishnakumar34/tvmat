@@ -1,4 +1,4 @@
-package com.example.tvmate
+package com.example.tvmat
 
 import android.content.Context
 import android.content.Intent
