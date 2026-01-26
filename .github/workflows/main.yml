@@ -1,0 +1,249 @@
+name: Magic Android Build (Release + Catbox)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: 🏗️ Construct Android Project Structure (tvmat)
+      run: |
+        echo "Creating directories..."
+        mkdir -p app/src/main/java/com/example/tvmat
+        mkdir -p app/src/main/res/values
+        mkdir -p app/src/main/res/drawable
+        mkdir -p app/src/main/res/mipmap-hdpi
+
+        echo "Moving Kotlin files..."
+        mv *.kt app/src/main/java/com/example/tvmat/ || true
+
+        echo "Refactoring Package Names..."
+        sed -i 's/package com.example.tvapp/package com.example.tvmat/g' app/src/main/java/com/example/tvmat/*.kt
+        sed -i 's/import com.example.tvapp/import com.example.tvmat/g' app/src/main/java/com/example/tvmat/*.kt
+
+        # Clean slate
+        rm -f build.gradle.kts
+        rm -f app/build.gradle.kts
+        rm -f settings.gradle.kts
+
+    - name: 🔑 Generate Temporary Signing Key
+      run: |
+        # Generate a keystore file inside the app directory
+        keytool -genkeypair -v -keystore app/release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias tvmat -dname "CN=tvmat, OU=TV, O=Mate, L=Internet, ST=World, C=US" -storepass android -keypass android
+
+    - name: 📝 Generate Config (Release + Minify)
+      run: |
+        # 1. Generate Gradle Properties
+        echo 'android.useAndroidX=true' > gradle.properties
+        echo 'android.enableJetifier=true' >> gradle.properties
+        echo 'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' >> gradle.properties
+        
+        # 2. Generate Settings.gradle.kts
+        cat <<EOF > settings.gradle.kts
+        pluginManagement {
+            repositories {
+                google()
+                mavenCentral()
+                gradlePluginPortal()
+            }
+        }
+        dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories {
+                google()
+                mavenCentral()
+                maven { url = uri("https://jitpack.io") }
+            }
+        }
+        rootProject.name = "tvmat"
+        include(":app")
+        EOF
+
+        # 3. Generate ROOT build.gradle.kts
+        cat <<EOF > build.gradle.kts
+        plugins {
+            id("com.android.application") version "8.2.0" apply false
+            id("org.jetbrains.kotlin.android") version "1.9.0" apply false
+        }
+        EOF
+
+        # 4. Generate Proguard Rules (To prevent breaking app when shrinking)
+        cat <<EOF > app/proguard-rules.pro
+        # Keep Compose
+        -keep class androidx.compose.** { *; }
+        -keep class androidx.compose.ui.** { *; }
+        
+        # Keep MPV
+        -keep class is.xyz.mpv.** { *; }
+        -keep interface is.xyz.mpv.** { *; }
+        
+        # Keep Kotlin Coroutines
+        -keepnames class kotlinx.coroutines.** { *; }
+        EOF
+
+        # 5. Generate APP build.gradle.kts (With Signing & Shrinking)
+        cat <<EOF > app/build.gradle.kts
+        plugins {
+            id("com.android.application")
+            id("org.jetbrains.kotlin.android")
+        }
+
+        android {
+            namespace = "com.example.tvmat"
+            compileSdk = 34
+
+            defaultConfig {
+                applicationId = "com.example.tvmat"
+                minSdk = 24
+                targetSdk = 34
+                versionCode = 1
+                versionName = "1.0"
+            }
+            
+            signingConfigs {
+                create("release") {
+                    storeFile = file("release-key.jks")
+                    storePassword = "android"
+                    keyAlias = "tvmat"
+                    keyPassword = "android"
+                }
+            }
+
+            buildTypes {
+                getByName("release") {
+                    isMinifyEnabled = true       // Enables code shrinking
+                    isShrinkResources = true     // Enables resource shrinking
+                    signingConfig = signingConfigs.getByName("release")
+                    proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                }
+            }
+
+            buildFeatures {
+                compose = true
+            }
+            composeOptions {
+                kotlinCompilerExtensionVersion = "1.5.0"
+            }
+            compileOptions {
+                sourceCompatibility = JavaVersion.VERSION_1_8
+                targetCompatibility = JavaVersion.VERSION_1_8
+            }
+            kotlinOptions {
+                jvmTarget = "1.8"
+            }
+            packaging {
+                resources {
+                    excludes += "/META-INF/{AL2.0,LGPL2.1}"
+                    excludes += "META-INF/DEPENDENCIES"
+                }
+            }
+            lint {
+                abortOnError = false
+            }
+        }
+
+        dependencies {
+            implementation(platform("org.jetbrains.kotlin:kotlin-bom:1.9.0"))
+            implementation("org.jetbrains.kotlin:kotlin-stdlib")
+            
+            // Core & Activity
+            implementation("androidx.core:core-ktx:1.12.0")
+            implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
+            implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.2")
+            implementation("androidx.activity:activity-compose:1.8.2") 
+            
+            // Compose & Material 3
+            implementation(platform("androidx.compose:compose-bom:2023.08.00"))
+            implementation("androidx.compose.ui:ui")
+            implementation("androidx.compose.ui:ui-tooling-preview")
+            implementation("androidx.compose.material3:material3")
+            implementation("androidx.compose.material:material-icons-extended") 
+
+            // TV Components
+            implementation("androidx.tv:tv-foundation:1.0.0-alpha10")
+            implementation("androidx.tv:tv-material:1.0.0-alpha10")
+            
+            // MPV Player
+            implementation("io.github.abdallahmehiz:mpv-android-lib:0.1.10")
+        }
+        EOF
+
+        # 6. Generate Manifest
+        cat <<EOF > app/src/main/AndroidManifest.xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+            <uses-feature android:name="android.software.leanback" android:required="false" />
+            <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+            
+            <application
+                android:icon="@mipmap/ic_launcher"
+                android:label="@string/app_name"
+                android:usesCleartextTraffic="true"
+                android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+                
+                <activity android:name=".MainActivity" android:exported="true">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                        <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                </activity>
+            </application>
+        </manifest>
+        EOF
+
+        # 7. Generate Strings
+        echo '<resources><string name="app_name">TV Mate</string></resources>' > app/src/main/res/values/strings.xml
+
+        # 8. Generate Vector Icon
+        cat <<EOF > app/src/main/res/mipmap-hdpi/ic_launcher.xml
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="24dp"
+            android:height="24dp"
+            android:viewportWidth="24.0"
+            android:viewportHeight="24.0">
+            <path
+                android:fillColor="#FF000000"
+                android:pathData="M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM12,17c-2.76,0 -5,-2.24 -5,-5s2.24,-5 5,-5 5,2.24 5,5 -2.24,5 -5,5z"/>
+        </vector>
+        EOF
+
+    - name: 🔧 Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.2'
+      
+    - name: 🚀 Build Release APK
+      run: gradle assembleRelease --no-daemon --stacktrace
+
+    - name: 📦 Upload to Catbox
+      run: |
+        echo "Uploading APK to Catbox..."
+        APK_PATH="app/build/outputs/apk/release/app-release.apk"
+        
+        # Upload using curl
+        RESPONSE=$(curl -F "reqtype=fileupload" -F "fileToUpload=@$APK_PATH" https://catbox.moe/user/api.php)
+        
+        echo "✅ Upload Complete!"
+        echo "⬇️ Download URL: $RESPONSE"
+        
+        # Add to Job Summary for easy access
+        echo "### 🚀 APK Download Link" >> $GITHUB_STEP_SUMMARY
+        echo "**[Download tvmat APK]($RESPONSE)**" >> $GITHUB_STEP_SUMMARY
+
+        
