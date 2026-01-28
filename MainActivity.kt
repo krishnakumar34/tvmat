@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -28,17 +29,14 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tv
-// --- MOBILE COMPONENTS (Keep these) ---
+// --- MOBILE COMPONENTS ---
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
-// --- TV COMPONENTS (Use Wildcard) ---
-import androidx.tv.material3.* // Note: We REMOVED explicit imports for Button and ButtonDefaults 
-// so the compiler uses the androidx.tv versions instead.
-
-import androidx.compose.runtime.*
+// --- TV COMPONENTS (Wildcard) ---
+import androidx.tv.material3.* import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,9 +65,17 @@ import kotlinx.coroutines.delay
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 1. INITIALIZE MPV PLAYER (Fixes Crash)
+        MPVLib.create(this)
+        
         setContent {
             TiviUi()
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        MPVLib.destroy()
     }
 }
 
@@ -98,12 +104,12 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showSearchInput by remember { mutableStateOf(false) }
 
-    // SEEKBAR / PLAYBACK STATE (NEW)
+    // SEEKBAR / PLAYBACK STATE
     var currentTime by remember { mutableFloatStateOf(0f) }
-    var totalDuration by remember { mutableFloatStateOf(1f) } // Default 1f to prevent div/0
+    var totalDuration by remember { mutableFloatStateOf(1f) } 
     var showSeekbar by remember { mutableStateOf(false) }
 
-    // GRID STATE (For auto-scrolling)
+    // GRID STATE
     val gridState = rememberTvLazyGridState()
 
     // OVERLAY STATE
@@ -115,13 +121,12 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
     val videoFocusRequester = remember { FocusRequester() }
     val saveButtonFocus = remember { FocusRequester() }
 
-    // Groups Logic
+    // GROUPS LOGIC
     val groups = remember(channels) { channels.groupBy { it.group } }
     var selectedGroup by remember { mutableStateOf<String?>(null) }
-
     var hasAutoPlayed by remember { mutableStateOf(false) }
 
-    // PERSISTENT FILE PICKER
+    // FILE PICKER
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -144,15 +149,20 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
     LaunchedEffect(Unit) {
         viewModel.loadPlaylist(currentUrl, context.contentResolver)
     }
-        // --- PLAYBACK POLLING LOOP (NEW) ---
-    // Polls MPV for current time and duration
+
+        // --- PLAYBACK POLLING LOOP (SAFE) ---
     LaunchedEffect(playingUrl) {
         while (true) {
             if (playingUrl.isNotEmpty()) {
-                val time = MPVLib.getPropertyDouble("time-pos")
-                val dur = MPVLib.getPropertyDouble("duration")
-                if (time != null) currentTime = time.toFloat()
-                if (dur != null && dur > 0) totalDuration = dur.toFloat()
+                try {
+                    // Wrap native calls to prevent crashes
+                    val time = MPVLib.getPropertyDouble("time-pos")
+                    val dur = MPVLib.getPropertyDouble("duration")
+                    if (time != null) currentTime = time.toFloat()
+                    if (dur != null && dur > 0) totalDuration = dur.toFloat()
+                } catch (e: Exception) {
+                    Log.e("MPV", "Error polling time: ${e.message}")
+                }
             }
             delay(500)
         }
@@ -194,15 +204,10 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
             val channel = channels.find { it.url == playingUrl }
 
             if (channel != null) {
-                // 1. Switch to correct group
                 if (searchQuery.isEmpty()) {
                     selectedGroup = channel.group
                 }
-
-                // 2. Wait for UI update
                 delay(100)
-
-                // 3. Find and Scroll
                 val currentList = if (searchQuery.isNotEmpty()) {
                     channels.filter { it.name.contains(searchQuery, true) }
                 } else {
@@ -246,7 +251,6 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
 
     // AUTO HIDE INFO OVERLAY
     LaunchedEffect(showInfoOverlay, showSeekbar) {
-        // Only hide overlay if user is NOT actively seeking
         if (showInfoOverlay && !showSeekbar) {
             delay(4000)
             showInfoOverlay = false
@@ -301,26 +305,22 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                         if (event.type == KeyEventType.KeyDown) {
                             val keyCode = event.nativeKeyEvent.keyCode
 
-                            // --- REMOTE CONTROLS LOGIC ---
                             if (videoControlsEnabled) {
                                 when (keyCode) {
-                                    // 1. SEEK FORWARD (Right) + SHOW BAR
                                     KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                                         try {
                                             MPVLib.command("seek", "10")
-                                            showSeekbar = true // TRIGGER COMPOSE UI
+                                            showSeekbar = true
                                         } catch (e: Exception) {}
                                         return@onPreviewKeyEvent true
                                     }
-                                    // 2. SEEK BACKWARD (Left) + SHOW BAR
                                     KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> {
                                         try {
                                             MPVLib.command("seek", "-10")
-                                            showSeekbar = true // TRIGGER COMPOSE UI
+                                            showSeekbar = true
                                         } catch (e: Exception) {}
                                         return@onPreviewKeyEvent true
                                     }
-                                    // 3. PLAY/PAUSE
                                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
                                         try {
                                             MPVLib.command("cycle", "pause")
@@ -328,7 +328,6 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                                         } catch (e: Exception) {}
                                         return@onPreviewKeyEvent true
                                     }
-                                    // 4. ZAPPING (Up/Down)
                                     KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
                                         zapNext()
                                         return@onPreviewKeyEvent true
@@ -337,14 +336,12 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                                         zapPrevious()
                                         return@onPreviewKeyEvent true
                                     }
-                                    // 5. OPEN MENU
                                     KeyEvent.KEYCODE_MENU -> {
                                         isMenuVisible = true
                                         return@onPreviewKeyEvent true
                                     }
                                 }
                             } else {
-                                // --- DEFAULT ZAPPING (Controls OFF) ---
                                 when (keyCode) {
                                     KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_CHANNEL_UP -> {
                                         zapNext()
@@ -366,7 +363,7 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
             )
         }
 
-        // LAYER 2: TIVIMATE STYLE PLAYER BAR
+             // LAYER 2: TIVIMATE STYLE PLAYER BAR
         AnimatedVisibility(
             visible = showSeekbar || (showInfoOverlay && !isMenuVisible && lastPlayedChannel != null),
             enter = slideInVertically { it } + fadeIn(),
@@ -376,7 +373,7 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // Gradient background for readability over video
+                    // Gradient background for readability
                     .background(
                         Brush.verticalGradient(
                             colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.95f))
@@ -384,12 +381,11 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                     )
                     .padding(start = 40.dp, end = 40.dp, bottom = 40.dp, top = 20.dp)
             ) {
-                // ROW 1: Channel Info
+                // ROW 1: Channel Info (ALWAYS VISIBLE)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
                 ) {
-                    // Blue Badge for Channel Number
                     Box(
                         modifier = Modifier
                             .background(Color(0xFF2962FF), RoundedCornerShape(4.dp))
@@ -402,10 +398,7 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                             fontSize = 14.sp
                         )
                     }
-
                     Spacer(modifier = Modifier.width(16.dp))
-
-                    // Channel Name
                     Text(
                         text = lastPlayedChannel?.name ?: "Unknown Channel",
                         color = Color.White,
@@ -417,48 +410,45 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                     )
                 }
 
-                // ROW 2: Progress Bar & Times
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Current Time
-                    Text(
-                        text = formatTime(currentTime),
-                        color = Color(0xFFB0B0B0),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.width(50.dp)
-                    )
-
-                    // The Progress Bar
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(Color(0xFF444444))
-                    ) {
-                        // The Blue Fill
+                // ROW 2: Progress Bar & Times (ONLY IF CONTROLS ENABLED)
+                if (videoControlsEnabled) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = formatTime(currentTime),
+                            color = Color(0xFFB0B0B0),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(50.dp)
+                        )
                         Box(
                             modifier = Modifier
-                                .fillMaxHeight()
-                                .fillMaxWidth(
-                                    fraction = if (totalDuration > 0) (currentTime / totalDuration).coerceIn(0f, 1f) else 0f
-                                )
-                                .background(Color(0xFF2962FF))
+                                .weight(1f)
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Color(0xFF444444))
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(
+                                        fraction = if (totalDuration > 0) (currentTime / totalDuration).coerceIn(0f, 1f) else 0f
+                                    )
+                                    .background(Color(0xFF2962FF))
+                            )
+                        }
+                        Text(
+                            text = formatTime(totalDuration),
+                            color = Color(0xFFB0B0B0),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(start = 12.dp)
                         )
                     }
-
-                    // Total Duration
-                    Text(
-                        text = formatTime(totalDuration),
-                        color = Color(0xFFB0B0B0),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(start = 12.dp)
-                    )
                 }
             }
         }
-                // LAYER 3: NUMBER BUFFER
+
+        // LAYER 3: NUMBER BUFFER
         if (numberBuffer.isNotEmpty()) {
             Box(
                 modifier = Modifier.align(Alignment.TopEnd).padding(40.dp)
@@ -527,7 +517,6 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                         }
                     }
 
-                    // RIGHT: GRID (Auto-Scroll State attached)
                     Box(modifier = Modifier.weight(1f).fillMaxHeight().padding(10.dp)) {
                         val displayChannels = if (searchQuery.isNotEmpty()) channels else (groups[selectedGroup] ?: emptyList())
 
@@ -535,7 +524,7 @@ fun TiviUi(viewModel: PlaylistViewModel = viewModel()) {
                             Text("No channels found", color = Color.Gray, modifier = Modifier.align(Alignment.Center))
                         } else {
                             TvLazyVerticalGrid(
-                                state = gridState, // <--- ATTACHED STATE
+                                state = gridState,
                                 columns = TvGridCells.Fixed(1),
                                 contentPadding = PaddingValues(10.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -644,3 +633,5 @@ class PreferencesManager(context: Context) {
     fun saveControlsEnabled(enabled: Boolean) { prefs.edit().putBoolean("video_controls", enabled).apply() }
     fun getControlsEnabled(): Boolean { return prefs.getBoolean("video_controls", false) }
 }
+
+        
