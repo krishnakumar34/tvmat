@@ -8,6 +8,10 @@ import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -15,10 +19,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import `is`.xyz.mpv.MPVLib
-
-// --- SAFETY LOCK ---
-// Prevents the "Double Init" crash and Black Screen issues
-private var isMpvInitialized = false
 
 @Composable
 fun VideoPlayer(
@@ -28,114 +28,141 @@ fun VideoPlayer(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    
+    // STATE: Track if MPV is actually ready to receive commands
+    var isInitialized by remember { mutableStateOf(false) }
 
-    // 1. CONFIGURE & INITIALIZE (Runs only once)
+    // 1. Initialize MPV Engine (Runs once safely)
     LaunchedEffect(Unit) {
-        if (!isMpvInitialized) {
-            try {
-                // --- FIX FOR TS FILES & BLACK SCREEN ---
-                MPVLib.setOptionString("vo", "gpu")
-                MPVLib.setOptionString("gpu-context", "android")
-                
-                // CRITICAL FIX: 'auto' recovers from background better than 'mediacodec'
-                MPVLib.setOptionString("hwdec", "auto") 
-                MPVLib.setOptionString("hwdec-codecs", "all")
-                
-                // CRITICAL FIX: Probe size allows TS files to load
-                MPVLib.setOptionString("demuxer-lavf-probesize", "5000000")
-                MPVLib.setOptionString("demuxer-lavf-analyzeduration", "5000000")
+        try {
+            MPVLib.create(context.applicationContext) 
+            
+            // --- VIDEO & DECODING OPTIONS (FIXED FOR TS FILES) ---
+            MPVLib.setOptionString("vo", "gpu") 
+            MPVLib.setOptionString("gpu-context", "android")
+            
+            // FIX: Changed from 'mediacodec' to 'auto'. 
+            // TS files often fail with strict hardware decoding; 'auto' allows software fallback.
+            MPVLib.setOptionString("hwdec", "mediacodec") 
+            MPVLib.setOptionString("hwdec-codecs", "all")
+            
+            // FIX: Increase probe size to detect TS/Stream formats better
+            //MPVLib.setOptionString("demuxer-lavf-probesize", "5000000")
+            
+            MPVLib.setOptionString("tls-verify", "no")
+            // Force video to stretch to screen size (ignore aspect ratio)
+            MPVLib.setOptionString("keepaspect", "no")
 
-                // FIX FOR LIVE STREAMS (Buffering)
-                MPVLib.setOptionString("cache", "yes")
-                MPVLib.setOptionString("demuxer-max-bytes", "64000000") // 64MB Buffer
-                MPVLib.setOptionString("demuxer-max-back-bytes", "64000000")
-                MPVLib.setOptionString("network-timeout", "30") // Wait longer for connection
+            // --- CONTROLS (OSC) ---
+            // Note: If osc=yes, MPV hides the custom 'osd-bar'. This is internal MPV behavior.
+            val oscVal = if (showControls) "yes" else "no"
+            MPVLib.setOptionString("osc", oscVal)
+            MPVLib.setOptionString("input-default-bindings", "yes")
 
-                // Standard Settings
-                MPVLib.setOptionString("keepaspect", "no")
-                MPVLib.setOptionString("tls-verify", "no")
-                
-                // OSD
-                MPVLib.setOptionString("osd-level", "3")
-                MPVLib.setOptionString("osd-on-seek", "msg-bar")
+            // --- OSD SETTINGS (FORCE SEEK BAR VISIBILITY) ---
+            MPVLib.setOptionString("osd-level", "3")       
+            
+            // "msg-bar" ensures we see the TIME + The BAR when seeking
+            MPVLib.setOptionString("osd-on-seek", "msg-bar") 
+            MPVLib.setOptionString("osd-scale-by-window", "no")
+            MPVLib.setOptionString("osd-duration", "2500")
 
-                // INITIALIZE
-                MPVLib.init()
-                isMpvInitialized = true 
-                
-            } catch (e: Exception) {
-                Log.e("MPV", "Init Error: ${e.message}")
-            }
+            // VISUAL STYLE (Applies only when osc=no)
+            MPVLib.setOptionString("osd-font-size", "50")
+            MPVLib.setOptionString("osd-bar-align-y", "0.9") 
+            MPVLib.setOptionString("osd-bar-w", "95")      
+            MPVLib.setOptionString("osd-bar-h", "3")       
+            MPVLib.setOptionString("osd-color", "#FFFFFFFF") 
+            MPVLib.setOptionString("osd-border-color", "#FF000000")
+
+            MPVLib.init()
+            
+            isInitialized = true // Mark as Ready
+        } catch (e: Exception) {
+            Log.e("MPV", "Failed to initialize MPV: ${e.message}")
         }
     }
 
-    // 2. LIFECYCLE HANDLER (Fixes Black Screen on Resume)
+    // 2. Dynamic Controls Update (Runtime)
+    LaunchedEffect(showControls, isInitialized) {
+        if (isInitialized) {
+            val valStr = if (showControls) "yes" else "no"
+            try {
+               MPVLib.setPropertyString("osc", valStr)
+            } catch (e: Exception) {}
+        }
+    }
+
+    // 3. Lifecycle Observer (Handle TV Pause/Resume)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (isMpvInitialized) {
+            if (isInitialized) {
                 when (event) {
-                    Lifecycle.Event.ON_PAUSE -> {
-                        MPVLib.setPropertyBoolean("pause", true)
-                    }
-                    Lifecycle.Event.ON_RESUME -> {
-                        // Unpause when we come back
-                        MPVLib.setPropertyBoolean("pause", false)
-                    }
-                    else -> {}
+                    Lifecycle.Event.ON_RESUME -> MPVLib.setPropertyBoolean("pause", false)
+                    Lifecycle.Event.ON_PAUSE -> MPVLib.setPropertyBoolean("pause", true)
+                    else -> Unit
                 }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
-    // 3. Handle URL Loading
-    LaunchedEffect(url) {
-        if (url.isNotEmpty() && isMpvInitialized) {
+    // 4. Handle URL Loading
+    LaunchedEffect(url, isInitialized) {
+        if (isInitialized && url.isNotEmpty()) {
             try {
-                MPVLib.command("loadfile", url)
+                // Use spread operator (*) to unpack the command array
+                MPVLib.command(*arrayOf("loadfile", url))
             } catch (e: Exception) {
-                Log.e("MPV", "Load Error: ${e.message}")
+                Log.e("MPV", "Error playing URL: ${e.message}")
             }
         }
     }
 
-    // 4. Dynamic Controls Toggle
-    LaunchedEffect(showControls) {
-        if (isMpvInitialized) {
-            val valStr = if (showControls) "yes" else "no"
+    // 5. Cleanup on Exit
+    DisposableEffect(Unit) {
+        onDispose {
             try {
-                MPVLib.setPropertyString("osc", valStr)
-            } catch (e: Exception) {}
+                // Good practice to detach before destroying
+                MPVLib.detachSurface()
+                MPVLib.destroy()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
-    // 5. Render Surface
+    // 6. Render Surface
     AndroidView(
         factory = {
             SurfaceView(context).apply {
                 layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
-                keepScreenOn = true // Prevents screen from sleeping
                 
                 holder.addCallback(object : SurfaceHolder.Callback {
                     override fun surfaceCreated(holder: SurfaceHolder) {
-                        if (isMpvInitialized) {
-                            // Re-attach surface immediately when app opens/resumes
+                        if (isInitialized) {
                             MPVLib.attachSurface(holder.surface)
+                        } else {
+                            // Retry mechanism if surface is ready before MPV init
+                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                try { MPVLib.attachSurface(holder.surface) } catch(e:Exception){}
+                            }, 500)
                         }
+                        keepScreenOn = true 
                     }
 
                     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                        if (isMpvInitialized) {
+                        if (isInitialized) {
                             MPVLib.setPropertyInt("android-surface-size", width * height)
                         }
                     }
 
                     override fun surfaceDestroyed(holder: SurfaceHolder) {
-                        if (isMpvInitialized) {
-                            // Detach safely when app minimizes
+                        if (isInitialized) {
                             MPVLib.detachSurface()
                         }
                     }
@@ -144,13 +171,4 @@ fun VideoPlayer(
         },
         modifier = modifier
     )
-    
-    // 6. Cleanup
-    DisposableEffect(Unit) {
-        onDispose {
-            if (isMpvInitialized) {
-                MPVLib.detachSurface()
-            }
-        }
-    }
 }
